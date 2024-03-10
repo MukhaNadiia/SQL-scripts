@@ -1,0 +1,72 @@
+with started_table as (
+		select 
+        	user_id,
+          	game_name,
+          	date(date_trunc('month',payment_date)) as current_payment_month, 
+          	sum(revenue_amount_usd) as revenue_amount
+		from project.games_payments gp 
+		group by 1,2,3
+     	 ),
+calculated_table as ( 
+		select 
+			user_id, current_payment_month, game_name, revenue_amount,
+			date(current_payment_month - interval '1' month) as previous_calendar_month,
+			date(current_payment_month + interval '1' month) as next_calendar_month,
+			lag(revenue_amount,1) over (partition by user_id order by current_payment_month) as previous_revenue_amount_by_user,
+			lag(current_payment_month,1) over (partition by user_id order by current_payment_month) as previous_month_by_user,
+			lead(current_payment_month,1) over (partition by user_id order by current_payment_month) as next_month_by_user
+		from started_table
+		),
+table_users_types  as (
+		select 
+			current_payment_month,
+			user_id,
+			game_name,
+			revenue_amount,
+			(revenue_amount - previous_revenue_amount_by_user) as revenue_delta,
+			'paid_users' as user_type
+		from calculated_table
+	union all
+		select
+			current_payment_month,
+			user_id,
+			game_name,
+			revenue_amount,
+			(revenue_amount - previous_revenue_amount_by_user) as revenue_delta,
+			'new_users' as user_type
+		from calculated_table
+		where previous_month_by_user is null
+	union all
+		select 
+			next_calendar_month,
+			user_id,
+			game_name,
+			-revenue_amount as revenue_amount,
+			(revenue_amount - previous_revenue_amount_by_user) as revenue_delta,
+			'churned_users' as user_type
+			from calculated_table
+			where next_month_by_user is null or next_month_by_user != next_calendar_month
+	union all	
+		select 
+			current_payment_month,
+			user_id,
+			game_name,
+			revenue_amount,
+			(revenue_amount - previous_revenue_amount_by_user) as revenue_delta,
+			'back_from_churned_users' as user_type
+			from calculated_table 
+			where previous_month_by_user <> previous_calendar_month 
+					and previous_month_by_user is not null
+			)			
+select 
+		current_payment_month,
+		user_id,
+		table_users_types.game_name,
+		revenue_amount,
+		revenue_delta,
+		user_type,
+		gpu.language,
+		gpu.has_older_device_model,
+		gpu.age
+from table_users_types 
+left join project.games_paid_users gpu using (user_id);
